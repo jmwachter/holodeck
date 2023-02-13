@@ -1145,3 +1145,73 @@ def evolve_eccen_uniform_single(sam, eccen_init, sepa_init, nsteps):
     return sepa, eccen
 
 
+def evolve_eccen(sam, hard, eccen_init, sepa_init, nsteps):
+    """Evolve binary eccentricity from an initial value along a range of separations.
+
+    Parameters
+    ----------
+    sam : `holodeck.sam.Semi_Analytic_Model` instance
+        The input semi-analytic model.  All this does is provide the range of total-masses to
+        determine the minimum ISCO radius, which then determines the smallest separations to
+        evolve until.
+    hard :
+    eccen_init : float,
+        Initial eccentricity of binaries at the given initial separation `sepa_init`.
+        Must be between [0.0, 1.0).
+    sepa_init : float,
+        Initial binary separation at which evolution begins.  Units of [cm].
+    nsteps : int,
+        Number of (log-spaced) steps in separation between the initial separation `sepa_init`,
+        and the final separation which is determined as the minimum ISCO radius based on the
+        smallest total-mass of binaries in the `sam` instance.
+
+    Returns
+    -------
+    sepa : (E,) ndarray of float
+        The separations at which the eccentricity evolution is defined over.  This is the
+        independent variable of the evolution.
+        The shape `E` is the value of the `nsteps` parameter.
+    eccen : (E,)
+        The eccentricity of the binaries at each location in separation given by `sepa`.
+        The shape `E` is the value of the `nsteps` parameter.
+
+    """
+    assert (0.0 <= eccen_init) and (eccen_init < 1.0)
+
+    #! CHECK FOR COALESCENCE !#
+
+    sepa_max = sepa_init
+    sepa_coal = holo.utils.schwarzschild_radius(sam.mtot) * 3
+    # frst_coal = utils.kepler_freq_from_sepa(sam.mtot, sepa_coal)
+    sepa_min = sepa_coal.min()
+    sepa = np.logspace(*np.log10([sepa_max, sepa_min]), nsteps)
+
+    mt, mr, rz = [xx.reshape(-1) for xx in sam.grid]
+
+    eshape = (mt.size, nsteps)
+    eccen = np.zeros(eshape)
+    eccen[..., 0] = eccen_init
+    dadt = np.zeros_like(eccen)
+    dadt[..., 0] = hard.dadt(mt, mr, sepa[0], eccen[..., 0])
+
+    for step in range(1, nsteps):
+        a0 = sepa[step-1]
+        a1 = sepa[step]
+        da = (a1 - a0)
+        e0 = eccen[..., step-1]
+
+        _dadt = dadt[..., step-1]
+        _dedt = hard.dedt(mt, mr, a0, e0)
+        deda = _dedt / _dadt
+        e1 = e0 + deda * da
+        e1 = np.clip(e1, 0.0, None)
+        eccen[..., step] = e1
+        dadt[..., step] = hard.dadt(mt, mr, a1, e1)
+
+    eshape = sam.shape + (nsteps,)
+    dadt = dadt.reshape(eshape)
+    eccen = eccen.reshape(eshape)
+
+    return sepa, dadt, eccen
+
+

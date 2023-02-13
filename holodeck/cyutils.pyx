@@ -43,7 +43,9 @@ cdef double MY_NWTG = 6.6742999e-08
 cdef double MY_SPLC = 29979245800.0
 cdef double MY_MPC = 3.08567758e+24
 cdef double MY_YR = 31557600.0
-cdef double GW_DADT_SEP_CONST = - 64.0 * pow(MY_NWTG, 3) / 5.0 / pow(MY_SPLC, 5)
+# See [Enoki+Nagashima-2007 eq. 2.8 & 2.9]
+# cdef double GW_DADT_SEP_CONST = - 64.0 * pow(MY_NWTG, 3) / 5.0 / pow(MY_SPLC, 5)  #! THIS IS WRONG !#
+cdef double GW_TAU_SEP_CONST = - 96.0 * pow(MY_NWTG, 3) / 5.0 / pow(MY_SPLC, 5)
 cdef double GW_SRC_CONST = 8.0 * pow(MY_NWTG, 5.0/3.0) * pow(M_PI, 2.0/3.0) / sqrt(10.0) / pow(MY_SPLC, 4.0)
 
 
@@ -347,6 +349,259 @@ cdef double interp_at_index(int idx, double xnew, double[:] xold, double[:] yold
     return ynew
 
 
+def sam_calc_gwb(ndens, mtot_log10, mrat, redz, dcom, gwfobs, sepa_evo, dadt_evo, eccen_evo, nharms=100):
+    """Pure-python wrapper for the SAM eccentric GWB calculation method.  See: `_sam_calc_gwb_single_eccen()`.
+    """
+    return _sam_calc_gwb(ndens, mtot_log10, mrat, redz, dcom, gwfobs, sepa_evo, dadt_evo, eccen_evo, nharms)
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+@cython.nonecheck(False)
+@cython.cdivision(True)
+cdef double[:, :] _sam_calc_gwb(
+    double[:, :, :] ndens,
+    double[:] mtot_log10,
+    double[:] mrat,
+    double[:] redz,
+    double[:] dcom,
+    double[:] gwfobs,
+    double[:] sepa_evo_in,
+    double[:, :, :, :] dadt_evo_in,
+    double[:, :, :, :] eccen_evo_in,
+    int nharms
+):
+    """Calculate the GWB from an eccentric SAM evolution model.
+
+    This function uses the precomputed binary-evolution of eccentricities over some range of separations.
+    This assumes a single eccentricity evolution e(a) for all binaries.
+    Redshifts are assumed to stay constant during this evolution.
+
+    h_c^2 = (dn/dz) * h_{s,n}^2 * 4*pi*c * d_c^2 * (1+z) * tau
+
+    h_{s,n}^2 = (32 / 5) * c^-8 * (2/n)^2 * (G Mchirp)^(10/3) * d_c^-2 * (2*pi*forb_r)^(4/3) * g(n,e)
+              = GW_SRC_CONST^2 * (2/n)^2 * Mchirp^(10/3) * d_c^-2 * forb_r^(4/3) * g(n,e)
+
+
+    Parameters
+    ----------
+    ndens : (double ***)
+        3D array specifying the SAM number-density of binaries in each bin, in total-mass, mass-ratio, and redshift.
+        This is typically `sam.static_binary_density`, corresponding to 'd^3 n / [dlog10M dq dz]' in units of [Mpc^-3].
+    mtot_log10 : (double *)
+        Array of log10 values of the total-mass (in grams) grid edges in the SAM model.  i.e. `log10(sam.mtot)`.
+    mrat : (double *)
+        Array of mass-ratio grid edges in the SAM model.  i.e. `sam.mrat`.
+    redz : (double *)
+        Array of values for the redshift grid edges in the SAM model.  i.e. `sam.redz`.
+    dcom : (double *)
+        Comoving distances in units of [Mpc] corresponding to each `redz` value.
+    gwfobs : (double *)
+        Array of GW observer-frame frequencies at which to evaluate the GWB.
+    sepa_evo_in : (double *)
+        The values of binary separation in units of [cm] at which the binaries have been evolved.
+    eccen_evo_in : (double *)
+        The values of binary eccentricity at each separation at which the binaries have been evolved.
+    nharms : int,
+        Number of harmonics at which to calculate GW strains.
+
+    Returns
+    -------
+    gwb : (double **)
+        2D array giving the characteristic-strain _squared_, at each observer-frame frequency and each harmonic.
+        Shape is (nfreqs, nharms), where `nfreqs` is the length of the `gwfobs` parameters, and `nharms` is given
+        as an input parameter directly.
+        The characteristic strain spectrum, h_c(f) is then `np.sqrt(gwb.sum(axis=1))`; i.e. the sum in quadrature of
+        strain at each harmonic.
+
+
+    To-Do
+    -----
+    * Should interpolation use sepa instead of converting to frequency each time?
+
+    """
+
+    # Initialize sizes and shapes
+    cdef int nfreqs = len(gwfobs)
+    cdef int n_mtot = len(mtot_log10)
+    cdef int n_mrat = len(mrat)
+    cdef int n_redz = len(redz)
+    cdef int nsteps_evo = len(sepa_evo_in)
+    cdef int num_freq_harm = nfreqs * nharms
+    cdef (int *)shape = <int *>malloc(2 * sizeof(int))
+    shape[0] = nfreqs
+    shape[1] = nharms
+
+    # Declare variables used later
+    cdef int ii, nh, jj, kk, aa, bb, ff, ecc_idx, ecc_idx_beg, ii_mm
+    cdef double m1, m2, mchirp, sa, tau, ecc, dx_x2x1, dadt
+    cdef double gwfr, zterm, dc_cm, dc_mpc, dc_term, gne, hterm
+    cdef double weight_ik, weight, four_over_nh_squared
+    cdef double mt, mt_sqrt, hterm_pref, frst_evo_lo, frst_evo_hi
+
+    # Initialize constants
+    cdef double four_pi_c_mpc = 4 * M_PI * (MY_SPLC / MY_MPC)
+    cdef double kep_sa_term = MY_NWTG / pow(2.0*M_PI, 2)
+    cdef double one_third = 1.0 / 3.0
+    cdef double two_third = 2.0 / 3.0
+    cdef double four_third = 4.0 / 3.0
+    cdef double three_fifths = 3.0 / 5.0
+    cdef double six_fifths = 6.0 / 5.0
+
+    # Initialize arrays
+    cdef np.ndarray[np.double_t, ndim=2] gwb = np.zeros((nfreqs, nharms))
+    cdef double *mtot = <double *>malloc(n_mtot * sizeof(double))
+    cdef double *ival = <double *>malloc(2 * sizeof(double))
+    cdef double *jval = <double *>malloc(2 * sizeof(double))
+    cdef double *kval = <double *>malloc(2 * sizeof(double))
+    # cdef double *sepa_evo = <double *>malloc(nsteps_evo * sizeof(double))
+    # cdef double *dadt_evo = <double *>malloc(nsteps_evo * sizeof(double))
+    # cdef double *eccen_evo = <double *>malloc(nsteps_evo * sizeof(double))
+    cdef double _freq_pref = (1.0/(2.0*M_PI)) * sqrt(MY_NWTG)
+    cdef double *frst_evo_pref = <double *>malloc(nsteps_evo * sizeof(double))
+    # Convert from numpy arrays to c-arrays (for possible speed improvements)
+    for ii in range(nsteps_evo):
+        # eccen_evo[ii] = <double>eccen_evo_in[ii]
+        # dadt_evo[ii] = <double>dadt_evo_in[ii]
+        # calculate the prefactor (i.e. everything except the mass) for kepler's law
+        frst_evo_pref[ii] = _freq_pref / pow(sepa_evo_in[ii], 1.5)
+
+    # Calculate all of the frequency harmonics (flattened) that are needed
+    cdef (double *)freq_harms = <double *>malloc(num_freq_harm * sizeof(double))
+    for ii in range(num_freq_harm):
+        # convert from 1D index to 2D grid of (F, H) frequencies and harmonics
+        unravel(ii, shape, &aa, &bb)
+        # calculate the n = bb+1 harmonic
+        freq_harms[ii] = gwfobs[aa] / (bb + 1)
+
+    # Find the indices by which to sort the frequency harmonics (flattened)
+    cdef (int *)sorted_index = <int *>malloc(num_freq_harm * sizeof(int))
+    argsort(freq_harms, num_freq_harm, &sorted_index)
+
+    # iterate over redshifts Z
+    for kk in range(n_redz):
+        # fill `kval` with the weight of this grid point (kval[0]), and the grid-width (kval[1])
+        my_trapz_grid_weight(kk, n_redz, redz, kval)
+        zterm = (1.0 + redz[kk])
+        dc_mpc = dcom[kk]   # this is still in units of [Mpc]
+        dc_cm = dc_mpc * MY_MPC  # convert to [cm]
+        dc_term = four_pi_c_mpc * pow(dc_mpc, 2)
+
+        # iterate over mtot M
+        ecc_idx_beg = 0   # we will keep track of evolution/eccentricity indices for our target
+                          # frequencies to make suring the arrays faster
+        # iterate over total masses in reverse, so that's we're always going to increasing frequencies
+        for ii_mm in range(n_mtot):
+            # convert from forward to backward indices
+            ii = n_mtot - 1 - ii_mm
+
+            # convert from log10 to regular total masses, only the first time through the loop
+            if kk == 0:
+                mt = pow(10.0, mtot_log10[ii])
+                mtot[ii] = mt
+            else:
+                mt = mtot[ii]
+
+            # calculate some needed quantities
+            mt_sqrt = sqrt(mt)
+            kep_sa_mass_term = kep_sa_term * mt
+            # fill `ival` with weight and grid-width in the mtot dimension
+            my_trapz_grid_weight(ii, n_mtot, mtot_log10, ival)
+
+            # precalculate some of the weighting factors over the 2D we have so far
+            weight_ik = ival[1] * kval[1] / (ival[0] * kval[0])
+
+            # iterate over mass ratios
+            for jj in range(n_mrat):
+                # fill `jval` with weight and grid-width in the mrat dimension
+                my_trapz_grid_weight(jj, n_mrat, mrat, jval)
+                # calculate the weight factor for this grid-cell
+
+                weight = weight_ik * (jval[1] / jval[0])
+
+                # convert for mtot, mrat to m1, m2 s.t. m2 <= m1    [grams]
+                # m1 = mt / (1.0 + mrat[jj])
+                # m2 = mt - m1
+                # calculate chirp-mass [grams]
+                mchirp = mt * pow(mrat[jj], three_fifths) / pow(1 + mrat[jj], six_fifths)
+
+                # n_c * (4*pi*c*d_c^2) * (1 + z)
+                hterm_pref = ndens[ii, jj, kk] * dc_term * zterm
+                # GW_SRC_CONST^2 * 2^(4/3) * Mc^(10/3) * dc^-2 * n_c * (4*pi*d_c^2) * (1 + z)
+                hterm_pref *= pow(GW_SRC_CONST * mchirp * pow(2.0*mchirp, two_third) / dc_cm, 2)
+
+                ecc_idx = ecc_idx_beg
+                for ff in range(num_freq_harm):
+                    unravel(sorted_index[ff], shape, &aa, &bb)
+
+                    nh = bb + 1
+                    four_over_nh_squared = 4.0 / (nh * nh)
+                    gwfr = gwfobs[aa] * zterm / nh
+
+                    # rest-frame frequency corresponding to target observer-frame frequency of GW observations
+                    sa = pow(kep_sa_mass_term / pow(gwfr, 2), one_third)
+                    # sa_fourth = pow(sa, 4)
+
+                    # ---- Interpolate eccentricity to this frequency
+
+                    # try to get `ecc_idx` such that   frst[idx] < gwfr < frst[idx+1]
+                    frst_evo_lo = frst_evo_pref[ecc_idx] * mt_sqrt
+                    frst_evo_hi = frst_evo_pref[ecc_idx+1] * mt_sqrt
+                    while (gwfr > frst_evo_hi) & (ecc_idx < nsteps_evo - 2):
+                        frst_evo_lo = frst_evo_hi
+                        ecc_idx += 1
+                        frst_evo_hi = frst_evo_pref[ecc_idx+1] * mt_sqrt
+
+                    if jj == 0 and ff == 0:
+                        ecc_idx_beg = ecc_idx
+
+                    # if `gwfr` is lower than lowest evolution point, continue to next frequency
+                    if (gwfr < frst_evo_lo):
+                        continue
+
+                    # if `gwfr` is > highest evolution point, also be true for all following frequencies, so break
+                    if (gwfr > frst_evo_hi):
+                        break
+
+                    # calculate slope M
+
+                    # y = y_0 + M * dx
+                    dx_x2x1 = (gwfr - frst_evo_lo) / (frst_evo_hi - frst_evo_lo)
+                    ecc = eccen_evo_in[ii, jj, kk, ecc_idx] + (eccen_evo_in[ii, jj, kk, ecc_idx+1] - eccen_evo_in[ii, jj, kk, ecc_idx]) * dx_x2x1
+                    dadt = dadt_evo_in[ii, jj, kk, ecc_idx] + (dadt_evo_in[ii, jj, kk, ecc_idx+1] - dadt_evo_in[ii, jj, kk, ecc_idx]) * dx_x2x1
+
+                    # ---- Calculate GWB contribution with this eccentricity
+
+                    gne = gw_freq_dist_func__scalar_scalar(nh, ecc)
+
+                    # GW-Only hardening timescale
+                    # fe_ecc = _gw_ecc_func(ecc)
+                    # # da/dt values are negative, convert to a positive timescale
+                    # tau = - sa_fourth / (GW_TAU_SEP_CONST * fe_ecc * m1 * m2 * mt)
+
+                    # tau  \equiv  f / (df/dt)  =  -(2/3) a / (da/dt)
+                    tau = - two_third * sa / dadt
+
+                    # Calculate the GW spectral strain at each harmonic
+                    #    see: [Amaro-seoane+2010 Eq.9]
+                    # GW_SRC_CONST^2 * 2^(4/3) * Mc^(10/3) * dc^-2 * n_c * (4*pi*c*d_c^2) * (1 + z)
+                    #     tau * gne * (2/n)^2 * forb_r^(4/3)
+                    hterm = hterm_pref * tau * gne * four_over_nh_squared * pow(gwfr, four_third)
+                    gwb[aa, bb] += hterm * weight
+
+    free(shape)
+    # free(sepa_evo)
+    # free(dadt_evo)
+    # free(eccen_evo)
+    free(frst_evo_pref)
+    free(freq_harms)
+    free(sorted_index)
+    free(mtot)
+    free(ival)
+    free(jval)
+    free(kval)
+    return gwb
+
+
 def sam_calc_gwb_single_eccen(ndens, mtot_log10, mrat, redz, dcom, gwfobs, sepa_evo, eccen_evo, nharms=100):
     """Pure-python wrapper for the SAM eccentric GWB calculation method.  See: `_sam_calc_gwb_single_eccen()`.
     """
@@ -562,9 +817,11 @@ cdef double[:, :] _sam_calc_gwb_single_eccen(
 
                     gne = gw_freq_dist_func__scalar_scalar(nh, ecc)
 
+                    # GW-Only hardening timescale
                     fe_ecc = _gw_ecc_func(ecc)
                     # da/dt values are negative, convert to a positive timescale
-                    tau = - sa_fourth / (GW_DADT_SEP_CONST * fe_ecc * m1 * m2 * mt)
+                    # tau = - sa_fourth / (GW_DADT_SEP_CONST * fe_ecc * m1 * m2 * mt)
+                    tau = - sa_fourth / (GW_TAU_SEP_CONST * fe_ecc * m1 * m2 * mt)
 
                     # Calculate the GW spectral strain at each harmonic
                     #    see: [Amaro-seoane+2010 Eq.9]
@@ -806,9 +1063,11 @@ cdef double[:, :, :] _sam_calc_gwb_single_eccen_discrete(
 
                     gne = gw_freq_dist_func__scalar_scalar(nh, ecc)
 
+                    # GW-Only hardening timescale
                     fe_ecc = _gw_ecc_func(ecc)
                     # da/dt values are negative, convert to a positive timescale
-                    tau = - sa_fourth / (GW_DADT_SEP_CONST * fe_ecc * m1 * m2 * mt)
+                    # tau = - sa_fourth / (GW_DADT_SEP_CONST * fe_ecc * m1 * m2 * mt)
+                    tau = - sa_fourth / (GW_TAU_SEP_CONST * fe_ecc * m1 * m2 * mt)
 
                     # Calculate the GW spectral strain at each harmonic
                     #    see: [Amaro-seoane+2010 Eq.9]

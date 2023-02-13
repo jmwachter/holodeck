@@ -1461,7 +1461,7 @@ def gw_dedt(m1, m2, sepa, eccen):
     cc = _GW_DEDT_ECC_CONST
     e2 = eccen**2
     dedt = cc * m1 * m2 * (m1 + m2) / np.power(sepa, 4)
-    dedt *= (1.0 + e2*121.0/304.0) * eccen / np.power(1 - e2, 5.0/2.0)
+    dedt = dedt * (1.0 + e2*121.0/304.0) * eccen / np.power(1 - e2, 5.0/2.0)
     return dedt
 
 
@@ -1570,7 +1570,7 @@ def gw_hardening_rate_dadt(m1, m2, sepa, eccen=None):
     dadt = cc * m1 * m2 * (m1 + m2) / np.power(sepa, 3)
     if eccen is not None:
         fe = _gw_ecc_func(eccen)
-        dadt *= fe
+        dadt = dadt * fe
     return dadt
 
 

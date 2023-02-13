@@ -201,9 +201,6 @@ class Hard_GW(_Hardening):
             Values are always positive.
 
         """
-        # fe = utils._gw_ecc_func(eccen)
-        # rv = 19 * eccen * (1.0 + (121/304)*eccen*eccen)   # numerator
-        # rv = rv / (12 * sepa * fe)
         rv = 1.0 / utils.gw_dade(sepa, eccen)
         return rv
 
@@ -807,16 +804,16 @@ class Fixed_Time(_Hardening):
         dedt = None if evo.eccen is None else np.zeros_like(dadt)
         return dadt, dedt
 
-    def dadt(self, mt, mr, sepa):
-        dadt, _dedt = self._dadt_dedt(mt, mr, sepa, self._norm, self._rchar, self._gamma_sc, self._gamma_df)
+    def dadt(self, mt, mr, sepa, eccen=None):
+        dadt, _dedt = self._dadt_dedt(mt, mr, sepa, eccen, self._norm, self._rchar, self._gamma_sc, self._gamma_df)
         return dadt
 
-    def dedt(self, mt, mr, sepa):
-        _dadt, dedt = self._dadt_dedt(mt, mr, sepa, self._norm, self._rchar, self._gamma_sc, self._gamma_df)
+    def dedt(self, mt, mr, sepa, eccen=None):
+        _dadt, dedt = self._dadt_dedt(mt, mr, sepa, eccen, self._norm, self._rchar, self._gamma_sc, self._gamma_df)
         return dedt
 
     @classmethod
-    def _dadt_dedt(cls, mtot, mrat, sepa, norm, rchar, g1, g2):
+    def _dadt_dedt(cls, mtot, mrat, sepa, eccen, norm, rchar, g1, g2):
         """Calculate hardening rate for the given raw parameters.
 
         Parameters
@@ -829,6 +826,8 @@ class Fixed_Time(_Hardening):
             Redshift.
         sepa : array_like
             Binary semi-major axis (separation) [cm].
+        eccen : array_like
+
         norm : array_like
             Hardening rate normalization, units of [cm/s].
         rchar : array_like
@@ -851,13 +850,18 @@ class Fixed_Time(_Hardening):
 
         """
         m1, m2 = utils.m1m2_from_mtmr(mtot, mrat)
-        dadt_gw = utils.gw_hardening_rate_dadt(m1, m2, sepa)
+        dadt_gw = utils.gw_hardening_rate_dadt(m1, m2, sepa, eccen=eccen)
+        if eccen is not None:
+            dedt_gw = utils.gw_dedt(m1, m2, sepa, eccen=eccen)
+        else:
+            dedt_gw = None
+            # dedt_gw = np.zeros_like(dadt_gw)
 
         xx = sepa / rchar
         dadt = cls.function(norm, xx, g1, g2)
         dadt = dadt + dadt_gw
 
-        dedt = None
+        dedt = dedt_gw
         return dadt, dedt
 
     # ====     Internal Functions    ====
@@ -1152,7 +1156,8 @@ class Fixed_Time(_Hardening):
         norm, mt, mr, rchar, gamma_sc, gamma_df = args
 
         # Calculate hardening rates along full evolutionary history
-        dadt, _ = cls._dadt_dedt(mt, mr, rads, norm, rchar, gamma_sc, gamma_df)
+        #! BUG/FIX not including eccentricity for calculation of total time !#
+        dadt, _ = cls._dadt_dedt(mt, mr, rads, None, norm, rchar, gamma_sc, gamma_df)
 
         # Integrate (inverse) hardening rates to calculate total lifetime
         tt = utils.trapz_loglog(- 1.0 / dadt, rads, axis=-1)

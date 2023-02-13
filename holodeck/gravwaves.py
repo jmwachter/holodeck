@@ -751,6 +751,17 @@ def sam_calc_gwb_single_eccen(gwfobs, sam, sepa_evo, eccen_evo, nharms=100):
     return np.asarray(gwb)
 
 
+def sam_calc_gwb(gwfobs, sam, sepa_evo, dadt_evo, eccen_evo, nharms=100):
+
+    ndens = sam.static_binary_density
+    mt_l10 = np.log10(sam.mtot)
+    mr = sam.mrat
+    rz = sam.redz
+    dc = cosmo.comoving_distance(sam.redz).to('Mpc').value
+    gwb = holo.cyutils.sam_calc_gwb(ndens, mt_l10, mr, rz, dc, gwfobs, sepa_evo, dadt_evo, eccen_evo, nharms)
+    return np.asarray(gwb)
+
+
 def sam_calc_gwb_single_eccen_discrete(gwfobs, sam, sepa_evo, eccen_evo, nharms=100, nreals=None):
 
     ndens = sam.static_binary_density
