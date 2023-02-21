@@ -1,6 +1,136 @@
+[project]
+name = "holodeck"
+# for dynamic metadata, see: https://setuptools.pypa.io/en/latest/userguide/pyproject_config.html#dynamic-metadata
+dynamic = ["version", "dependencies"]
+authors = [
+    {name = "NANOGrav"},
+    {name = "Luke Zoltan Kelley", email = "lzkelley@berkeley.edu"},
+]
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+
+[project.urls]
+Documentation = "https://holodeck-gw.readthedocs.io/"
+Source = "https://github.com/NANOGrav/holodeck/"
+
+[tool.setuptools.dynamic]
+version = {attr = "holodeck.__version__"}
+dependencies = {file = ["requirements.txt", "requirements-dev.txt"]}
+
 [build-system]
-requires = ["setuptools >= 40.6.0", "wheel", "Cython"]
+requires = ["setuptools >= 40.6.0", "wheel", "Cython", "numpy", "scipy"]
 build-backend = "setuptools.build_meta"
 
 [mypy]
 allow_redefinition = true
+
+[tool.tox]
+legacy_tox_ini = """
+[tox]
+requires = tox-conda
+isolated_build = true
+conda_channels = conda-forge
+deps =
+    numpy
+    -r{tox_ini_dir}/requirements.txt
+    -r{tox_ini_dir}/requirements-dev.txt
+parallel_show_output = true
+envlist =
+    py38
+    py39
+    py310
+
+[testenv]
+allowlist_externals =
+    which
+    python
+    pytest
+    flake8
+    cat
+commands =
+    which python
+    python --version
+    python setup.py build_ext -i
+    python setup.py develop
+    py39: python {toxinidir}/scripts/convert_notebook_tests.py
+    py39: cat {toxinidir}/holodeck/tests/converted_notebooks/test_notebook_discrete_illustris.py
+    which pytest
+    pytest --version
+    !py39: pytest --ignore=holodeck/tests/converted_notebooks/
+    py39: pytest -v --cov=holodeck --cov-report=html:coverage --color=yes
+    py39: which flake8
+    py39: flake8 --version
+    py39: flake8
+"""
+
+# [flake8]
+# max-line-length=140
+# docstring-convention=all
+# max-complexity = 10
+# exclude =
+#     .git
+#     .tox
+#     __pycache__
+#     build
+#     converted_notebooks
+#     dist
+#     data
+#     docs
+#     notebooks
+#     notebooks/dev
+#     scripts
+#     venv
+#     pyproject.toml
+# ignore=
+#     F401   # imported but unused
+#     W293   # blank line contains whitespace
+#     E226   # missing whitespace around arithmetic operator
+#     E241   # multiple spaces after ','
+#     E722   # do not use bare 'except'
+#     E731   # do not assign a lambda expression, use a def
+#     C901   # is too complex (17)
+#     W605   # invalid escape sequence [e.g. '\s'] :: can be caused by inline sphinx latex math
+#     # E262   # inline comment should start with '# '
+#     # E302   # expected 2 blank lines, found 1
+#     # W391   # blank line at end of file
+
+# #     P102,B311,W503,E226,S311,
+# #     # Missing Docstrings
+# #     D100,D104,D105,D107,
+# #     # Docstring Whitespace
+# #     D203,D212,D214,D215,
+# #     # Docstring Quotes
+# #     D301,D302,
+# #     # Docstring Content
+# #     D400,D401,D402,D404,D405,D406,D407,D408,D409,D410,D411,D412,D413,D414,D416,D417,
+# #     # Type Annotations
+# #     ANN002,ANN003,ANN101,ANN102,ANN204,ANN206,
+# #     # pep8-naming
+# #     N802,N806,N815,
+
+# [coverage:run]
+# ; branch = true
+# parallel = true
+
+# [coverage:report]
+# show_missing = True
+# omit =
+#     ./holodeck/tests/*
+#     ./scripts/*
+#     setup.py
+# exclude_lines =
+#     \#\s*pragma: no cover
+#     \#\s*\bnocov\b
+#     ^\s*raise NotImplementedError\b
+#     ^\s*return NotImplemented\b
+#     ^\s*raise$
+#     @abstractmethod
+#     @abc.abstractmethod
+
+# [pytest]
+# filterwarnings =
+#     ; action:message:category:module:line
+#     ; ignore:<REGEX>:<TYPE>
+#     ignore:overflow encountered in exp:RuntimeWarning
+#     ignore:invalid escape sequence:DeprecationWarning

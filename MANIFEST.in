@@ -5,6 +5,7 @@ include MANIFEST.in
 include README.md
 include requirements-dev.txt
 include requirements.txt
+include setup.py
 include tox.ini
 
 graft holodeck
